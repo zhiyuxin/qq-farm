@@ -1,0 +1,13 @@
+packages:
+  - core
+  - web
+
+allowBuilds:
+  '@parcel/watcher': true
+  esbuild: true
+  protobufjs: true
+
+ignoredBuiltDependencies:
+  - '@parcel/watcher'
+  - esbuild
+  - protobufjs
