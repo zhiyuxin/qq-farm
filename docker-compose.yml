@@ -15,6 +15,11 @@ services:
       - TZ=${TZ:-Asia/Shanghai}
       - NODE_ENV=production
       - ADMIN_PORT=3007
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - WX_PROXY_API_URL=${WX_PROXY_API_URL:-}
+      - WX_PROXY_API_KEY=${WX_PROXY_API_KEY:-}
+      - WX_PROXY_APP_ID=${WX_PROXY_APP_ID:-wx5306c5978fdb76e4}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3007/api/status"]
       interval: 30s
