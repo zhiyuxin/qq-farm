@@ -2364,7 +2364,7 @@ function startAdminServer(dataProvider) {
     // ============ 微信登录代理 API ============
     // 用于转发请求到第三方微信登录 API（如 api.aineishe.com）
     app.post('/api/proxy', async (req, res) => {
-        const { action, ...params } = req.body || {};
+        const { action, ...payload } = req.body || {};
 
         if (!action) {
             return res.status(400).json({ code: -1, msg: '缺少 action 参数' });
@@ -2378,24 +2378,128 @@ function startAdminServer(dataProvider) {
 
         // 如果是 jslogin 动作，自动添加 appid
         if (action === 'jslogin') {
-            params.appid = appId;
+            payload.appid = appId;
         }
 
-        try {
-            const params = new URLSearchParams({ action: String(action) });
-            if (apiKey) params.set('api_key', apiKey);
-            const separator = String(apiUrl).includes('?') ? '&' : '?';
-            const url = `${apiUrl}${separator}${params.toString()}`;
-            adminLogger.info('proxy request', { action, apiUrl });
+        const readJsonResponse = async (response, requestUrl) => {
+            const text = await response.text();
+            let data;
+            try {
+                data = text ? JSON.parse(text) : null;
+            } catch (error) {
+                const preview = String(text || '').slice(0, 120);
+                throw new Error(`invalid json response from ${requestUrl}: ${error.message}; body=${preview}`);
+            }
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status} from ${requestUrl}: ${data?.msg || data?.Message || response.statusText}`);
+            }
+            return data;
+        };
 
-            const response = await fetch(url, {
+        const postJson = async (requestUrl, body) => {
+            const response = await fetch(requestUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(params)
+                body: JSON.stringify(body || {}),
             });
+            return readJsonResponse(response, requestUrl);
+        };
 
-            const data = await response.json();
-            res.json(data);
+        const getNested = (obj, paths) => {
+            for (const path of paths) {
+                const value = path.split('.').reduce((cur, key) => (cur && cur[key] !== undefined ? cur[key] : undefined), obj);
+                if (value !== undefined && value !== null && value !== '') return value;
+            }
+            return '';
+        };
+
+        const normalizeWechatIpadResult = (data) => {
+            if (!data || typeof data !== 'object') return data;
+            if (data.code !== undefined || data.data !== undefined) return data;
+
+            const rawData = data.Data || {};
+            const success = data.Success === true;
+            const rawCode = Number(data.Code);
+            const msg = data.Message || (success ? '成功' : '请求失败');
+
+            if (action === 'getqr' && success) {
+                return {
+                    code: 0,
+                    msg,
+                    data: {
+                        ...rawData,
+                        Uuid: rawData.Uuid || rawData.uuid || '',
+                        QrBase64: rawData.QrBase64 || rawData.qrBase64 || '',
+                    },
+                };
+            }
+
+            if (action === 'checkqr' && success) {
+                const wxid = getNested(rawData, ['wxid', 'Wxid', 'WxId', 'userName', 'UserName', 'acctSectResp.userName', 'AcctSectResp.UserName']);
+                const nickname = getNested(rawData, ['nickname', 'Nickname', 'NickName', 'nickName', 'acctSectResp.nickName', 'AcctSectResp.NickName']);
+                if (wxid) {
+                    return { code: 0, msg, data: { ...rawData, wxid, nickname } };
+                }
+                const status = Number(rawData.status ?? rawData.Status);
+                return { code: status === 1 ? -2 : -1, msg, data: rawData };
+            }
+
+            if (action === 'jslogin' && success) {
+                const code = getNested(rawData, ['code', 'Code']);
+                return { code: code ? 0 : -1, msg, data: { ...rawData, code } };
+            }
+
+            return { code: Number.isFinite(rawCode) ? rawCode : -1, msg, data: rawData };
+        };
+
+        const buildWechatIpadRequest = () => {
+            const baseUrl = String(apiUrl || '').replace(/\/+$/, '');
+            if (action === 'getqr') {
+                return { url: `${baseUrl}/Login/LoginGetQRCar`, body: payload };
+            }
+            if (action === 'checkqr') {
+                const uuid = payload.uuid || payload.Uuid || '';
+                return { url: `${baseUrl}/Login/LoginCheckQR?uuid=${encodeURIComponent(uuid)}`, body: {} };
+            }
+            if (action === 'jslogin') {
+                return {
+                    url: `${baseUrl}/Wxapp/JSLogin`,
+                    body: {
+                        Wxid: payload.wxid || payload.Wxid || payload.userName || '',
+                        Appid: payload.appid || appId,
+                    },
+                };
+            }
+            return null;
+        };
+
+        try {
+            const fallback = buildWechatIpadRequest();
+            if (!apiKey && fallback) {
+                adminLogger.info('proxy request WeChatIpad route', { action, apiUrl, routeUrl: fallback.url });
+                const data = await postJson(fallback.url, fallback.body);
+                return res.json(normalizeWechatIpadResult(data));
+            }
+
+            const queryParams = new URLSearchParams({ action: String(action) });
+            if (apiKey) queryParams.set('api_key', apiKey);
+            const separator = String(apiUrl).includes('?') ? '&' : '?';
+            const url = `${apiUrl}${separator}${queryParams.toString()}`;
+            adminLogger.info('proxy request', { action, apiUrl });
+
+            try {
+                const data = await postJson(url, payload);
+                return res.json(data);
+            } catch (primaryError) {
+                if (!fallback) throw primaryError;
+                adminLogger.warn('proxy action request failed, trying WeChatIpad route', {
+                    action,
+                    error: primaryError.message,
+                    fallbackUrl: fallback.url,
+                });
+                const data = await postJson(fallback.url, fallback.body);
+                return res.json(normalizeWechatIpadResult(data));
+            }
         } catch (error) {
             adminLogger.error('proxy error', { error: error.message, action });
             res.status(500).json({
