@@ -15,10 +15,5 @@
     "package:mac": "pnpm build:web && pnpm -C core build:mac",
     "package:release": "pnpm build:web && pnpm -C core build:release",
     "install:all": "pnpm install -r"
-  },
-  "pnpm": {
-    "overrides": {
-      "@babel/traverse": "7.26.10"
-    }
   }
 }
