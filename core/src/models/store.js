@@ -1261,11 +1261,13 @@ function setSystemConfig(config) {
     return { ...globalConfig.systemConfig };
 }
 
+const DEFAULT_WX_API_URL = String(process.env.WX_PROXY_API_URL || 'http://127.0.0.1:8059/api').trim();
+
 const DEFAULT_WX_CONFIG = {
     enabled: true,
-    apiBase: 'http://127.0.0.1:8059/api',
-    apiKey: '',
-    proxyApiUrl: 'http://127.0.0.1:8059/api',
+    apiBase: DEFAULT_WX_API_URL,
+    apiKey: String(process.env.WX_PROXY_API_KEY || '').trim(),
+    proxyApiUrl: DEFAULT_WX_API_URL,
     appId: 'wx5306c5978fdb76e4',
     autoAddAccount: true,
     userIsolation: true,

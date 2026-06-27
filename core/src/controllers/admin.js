@@ -461,7 +461,7 @@ function startAdminServer(dataProvider) {
     });
 
     app.use('/api', (req, res, next) => {
-        if (req.path === '/login' || req.path === '/qr/create' || req.path === '/qr/check' || req.path === '/proxy' || req.path === '/card-claim/status' || req.path === '/card-claim/claim' || req.path === '/game-version') return next();
+        if (req.path === '/login' || req.path === '/qr/create' || req.path === '/qr/check' || req.path === '/card-claim/status' || req.path === '/card-claim/claim' || req.path === '/game-version') return next();
         return authRequired(req, res, next);
     });
 
@@ -2373,12 +2373,8 @@ function startAdminServer(dataProvider) {
         // 从请求头或配置中获取 API 配置
         // 优先使用请求头中的配置（前端传入）
         const apiUrl = req.headers['x-proxy-api-url'] || process.env.WX_PROXY_API_URL || 'http://127.0.0.1:8059/api';
-        const apiKey = req.headers['x-proxy-api-key'] || process.env.WX_PROXY_API_KEY || '';
+        const apiKey = String(req.headers['x-proxy-api-key'] || process.env.WX_PROXY_API_KEY || '').trim();
         const appId = req.headers['x-proxy-app-id'] || process.env.WX_PROXY_APP_ID || 'wx5306c5978fdb76e4';
-
-        if (!apiKey) {
-            return res.status(400).json({ code: -1, msg: '缺少 API Key' });
-        }
 
         // 如果是 jslogin 动作，自动添加 appid
         if (action === 'jslogin') {
@@ -2386,7 +2382,10 @@ function startAdminServer(dataProvider) {
         }
 
         try {
-            const url = `${apiUrl}?api_key=${encodeURIComponent(apiKey)}&action=${action}`;
+            const params = new URLSearchParams({ action: String(action) });
+            if (apiKey) params.set('api_key', apiKey);
+            const separator = String(apiUrl).includes('?') ? '&' : '?';
+            const url = `${apiUrl}${separator}${params.toString()}`;
             adminLogger.info('proxy request', { action, apiUrl });
 
             const response = await fetch(url, {
