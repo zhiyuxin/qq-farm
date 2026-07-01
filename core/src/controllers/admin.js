@@ -38,20 +38,47 @@ function decodeUrlValue(value) {
 }
 
 function extractPushedCode(input) {
+    return extractPushedLoginParams(input).code;
+}
+
+function extractQueryValue(raw, key) {
+    const match = cleanText(raw).match(new RegExp(`[?&]${key}=([^&\\s]+)`, 'i'));
+    if (!match || !match[1]) return '';
+    return cleanText(decodeUrlValue(match[1]));
+}
+
+function extractPushedLoginParams(input) {
     const raw = cleanText(input);
-    if (!raw) return '';
+    if (!raw) return {};
 
     try {
         const parsed = new URL(raw);
-        const code = parsed.searchParams.get('code');
-        if (code) return cleanText(code);
+        const code = cleanText(parsed.searchParams.get('code'));
+        if (code) {
+            return {
+                code,
+                clientVersion: cleanText(parsed.searchParams.get('ver')),
+                platform: cleanText(parsed.searchParams.get('platform')),
+                os: cleanText(parsed.searchParams.get('os')),
+                serverUrl: `${parsed.protocol}//${parsed.host}${parsed.pathname}`,
+            };
+        }
     } catch {
         // Plain codes are not valid URLs.
     }
 
-    const match = raw.match(/[?&]code=([^&\s]+)/i);
-    if (match && match[1]) return cleanText(decodeUrlValue(match[1]));
-    return raw;
+    const code = extractQueryValue(raw, 'code');
+    if (code) {
+        return {
+            code,
+            clientVersion: extractQueryValue(raw, 'ver'),
+            platform: extractQueryValue(raw, 'platform'),
+            os: extractQueryValue(raw, 'os'),
+            serverUrl: '',
+        };
+    }
+
+    return { code: raw };
 }
 
 function getCodeUpdateRequestToken(req) {
@@ -708,8 +735,12 @@ function startAdminServer(dataProvider) {
             const accountRef = cleanText(
                 body.account || body.accountId || body.id || req.query.account || req.query.accountId || req.headers['x-account-id'],
             );
-            const pushedCode = extractPushedCode(body.code || body.url || body.wsUrl || body.link || req.query.code || req.query.url);
-            const platform = cleanText(body.platform || req.query.platform).toLowerCase();
+            const loginParams = extractPushedLoginParams(body.code || body.url || body.wsUrl || body.link || req.query.code || req.query.url);
+            const pushedCode = loginParams.code;
+            const platform = cleanText(body.platform || req.query.platform || loginParams.platform).toLowerCase();
+            const clientVersion = cleanText(body.clientVersion || body.ver || req.query.clientVersion || req.query.ver || loginParams.clientVersion);
+            const os = cleanText(body.os || req.query.os || loginParams.os);
+            const serverUrl = cleanText(body.serverUrl || req.query.serverUrl || loginParams.serverUrl);
             const loginType = cleanText(body.loginType || req.query.loginType);
             const restart = parseBooleanFlag(body.restart !== undefined ? body.restart : req.query.restart, true);
 
@@ -739,6 +770,27 @@ function startAdminServer(dataProvider) {
             };
             if (platform) payload.platform = platform;
             if (loginType) payload.loginType = loginType;
+
+            let runtimeConfigUpdated = false;
+            let runtimeConfig = getRuntimeConfig();
+            if (clientVersion || platform || os || serverUrl) {
+                const currentSystemConfig = {
+                    ...getDefaultSystemConfig(),
+                    ...runtimeConfig,
+                    ...(store.getSystemConfig() || {}),
+                };
+                const nextSystemConfig = {
+                    ...currentSystemConfig,
+                    ...(serverUrl ? { serverUrl } : {}),
+                    ...(clientVersion ? { clientVersion } : {}),
+                    ...(platform ? { platform } : {}),
+                    ...(os ? { os } : {}),
+                };
+                const savedSystemConfig = store.setSystemConfig(nextSystemConfig);
+                updateRuntimeConfig(savedSystemConfig);
+                runtimeConfig = getRuntimeConfig();
+                runtimeConfigUpdated = true;
+            }
 
             const data = addOrUpdateAccount(payload);
             const updated = Array.isArray(data.accounts)
@@ -774,6 +826,8 @@ function startAdminServer(dataProvider) {
                     platform: (updated && updated.platform) || platform || target.platform || '',
                     codePreview: makeCodePreview(pushedCode),
                     codeLength: pushedCode.length,
+                    clientVersion: runtimeConfig.clientVersion,
+                    runtimeConfigUpdated,
                     wasRunning,
                     restart,
                     runtimeAction,

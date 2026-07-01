@@ -16,6 +16,7 @@ Options:
   --token       CODE_UPDATE_TOKEN configured on the server.
   --account     Account id, QQ/uin, or exact account remark.
   --platform    Optional: qq or wx.
+  --ver         Optional client version. Auto-extracted from full URLs.
   --code        Plain code or a full URL containing code=.
   --restart     Optional: true/false. Default true.
   --no-restart  Only save code, do not start or restart the account.
@@ -66,27 +67,51 @@ function readStdin() {
 }
 
 function extractCode(input) {
+  return extractLoginParams(input).code;
+}
+
+function extractQueryValue(raw, key) {
+  const match = clean(raw).match(new RegExp(`[?&]${key}=([^&\\s]+)`, 'i'));
+  if (!match || !match[1]) return '';
+  try {
+    return clean(decodeURIComponent(match[1]));
+  } catch {
+    return clean(match[1]);
+  }
+}
+
+function extractLoginParams(input) {
   const raw = clean(input);
-  if (!raw) return '';
+  if (!raw) return {};
 
   try {
     const parsed = new URL(raw);
-    const code = parsed.searchParams.get('code');
-    if (code) return clean(code);
+    const code = clean(parsed.searchParams.get('code'));
+    if (code) {
+      return {
+        code,
+        clientVersion: clean(parsed.searchParams.get('ver')),
+        platform: clean(parsed.searchParams.get('platform')),
+        os: clean(parsed.searchParams.get('os')),
+        serverUrl: `${parsed.protocol}//${parsed.host}${parsed.pathname}`,
+      };
+    }
   } catch {
     // Plain codes are not URLs.
   }
 
-  const match = raw.match(/[?&]code=([^&\s]+)/i);
-  if (match && match[1]) {
-    try {
-      return clean(decodeURIComponent(match[1]));
-    } catch {
-      return clean(match[1]);
-    }
+  const code = extractQueryValue(raw, 'code');
+  if (code) {
+    return {
+      code,
+      clientVersion: extractQueryValue(raw, 'ver'),
+      platform: extractQueryValue(raw, 'platform'),
+      os: extractQueryValue(raw, 'os'),
+      serverUrl: '',
+    };
   }
 
-  return raw;
+  return { code: raw };
 }
 
 function buildEndpoint(args) {
@@ -122,8 +147,12 @@ async function main() {
   const token = clean(args.token || process.env.QQ_FARM_CODE_TOKEN || process.env.CODE_UPDATE_TOKEN);
   const account = clean(args.account || args.id || process.env.QQ_FARM_ACCOUNT);
   const rawCode = clean(args.code || args.url || args._[0] || process.env.QQ_FARM_CODE || stdin);
-  const code = extractCode(rawCode);
-  const platform = clean(args.platform || process.env.QQ_FARM_PLATFORM).toLowerCase();
+  const loginParams = extractLoginParams(rawCode);
+  const code = loginParams.code;
+  const platform = clean(args.platform || process.env.QQ_FARM_PLATFORM || loginParams.platform).toLowerCase();
+  const clientVersion = clean(args.clientVersion || args.ver || process.env.QQ_FARM_CLIENT_VERSION || loginParams.clientVersion);
+  const os = clean(args.os || process.env.QQ_FARM_OS || loginParams.os);
+  const serverUrl = clean(args.gameServer || process.env.QQ_FARM_GAME_SERVER || loginParams.serverUrl);
 
   if (!endpoint || !token || !account || !code) {
     usage();
@@ -143,6 +172,9 @@ async function main() {
     source: clean(args.source || 'push-code-script'),
   };
   if (platform) payload.platform = platform;
+  if (clientVersion) payload.clientVersion = clientVersion;
+  if (os) payload.os = os;
+  if (serverUrl) payload.serverUrl = serverUrl;
 
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -169,6 +201,7 @@ async function main() {
   console.log('Code updated successfully.');
   console.log(`Account: ${result.accountName || account} (${result.accountId || account})`);
   console.log(`Platform: ${result.platform || platform || 'unchanged'}`);
+  console.log(`Client version: ${result.clientVersion || clientVersion || 'unchanged'}`);
   console.log(`Code: ${result.codePreview || '(hidden)'} length=${result.codeLength || code.length}`);
   console.log(`Runtime: ${result.runtimeAction || 'none'}`);
 }
