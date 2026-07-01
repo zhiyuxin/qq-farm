@@ -458,19 +458,21 @@ async function startBot(config) {
         onWsError = null;
     }
     onWsError = (payload) => {
-        if ((Number(payload?.code) || 0) !== 400) return;
+        const errorCode = Number(payload?.code) || 0;
+        if (![400, 401, 403, 501].includes(errorCode)) return;
         const now = Date.now();
         if (now - wsErrorHandledAt < 4000) return;
         wsErrorHandledAt = now;
         log('系统', '连接被拒绝，可能需要更新 Code');
+        log('系统', `连接被拒绝 (${errorCode})，请重新获取 Code 或检查客户端版本/平台参数`);
         sendToMaster({
             type: 'ws_error',
-            code: 400,
+            code: errorCode,
             message: payload?.message || '',
         });
         if (isRunning) {
             workerScheduler.setTimeoutTask('ws_error_cleanup', 1000, () => {
-                if (isRunning) cleanup();
+                if (isRunning) stopBot().catch(() => exitWorker(1));
             });
         }
     };

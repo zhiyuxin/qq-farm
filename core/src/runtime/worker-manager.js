@@ -460,6 +460,14 @@ function createWorkerManager(options) {
                     worker.name,
                 );
                 scheduleWechatCodeRefreshRestart(accountId, message);
+            } else if ([401, 403, 501].includes(code)) {
+                addAccountLog(
+                    `ws_${code}`,
+                    `账号 ${worker.name} 连接被拒绝，请重新获取 Code 或检查客户端版本/平台参数`,
+                    accountId,
+                    worker.name,
+                    { code, message },
+                );
             }
         } else if (msg.type === 'account_kicked') {
             const reason = msg.reason || '未知';
