@@ -197,12 +197,12 @@ function createDataProvider(options) {
             return data;
         },
 
-        startAccount: async (accountRef) => {
+        startAccount: async (accountRef, options = {}) => {
             const accountId = resolveAccountRefId(accountRef);
             const acc = findAccountByAnyRef(accountId || accountRef);
             if (!acc) return false;
             if (accountId && workers[accountId]) return true;
-            return startWorker(acc);
+            return startWorker(acc, options);
         },
 
         stopAccount: (accountRef) => {
@@ -213,11 +213,11 @@ function createDataProvider(options) {
             return true;
         },
 
-        restartAccount: async (accountRef) => {
+        restartAccount: async (accountRef, options = {}) => {
             const accountId = resolveAccountRefId(accountRef);
             const acc = findAccountByAnyRef(accountId || accountRef);
             if (!acc) return false;
-            return restartWorker(acc);
+            return restartWorker(acc, options);
         },
 
         isAccountRunning: (accountRef) => {

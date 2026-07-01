@@ -25,6 +25,86 @@ const userStore = require('../models/user-store');
 const hashPassword = (pwd) => crypto.createHash('sha256').update(String(pwd || '')).digest('hex');
 const adminLogger = createModuleLogger('admin');
 
+function cleanText(value) {
+    return String(value === undefined || value === null ? '' : value).trim();
+}
+
+function decodeUrlValue(value) {
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        return value;
+    }
+}
+
+function extractPushedCode(input) {
+    const raw = cleanText(input);
+    if (!raw) return '';
+
+    try {
+        const parsed = new URL(raw);
+        const code = parsed.searchParams.get('code');
+        if (code) return cleanText(code);
+    } catch {
+        // Plain codes are not valid URLs.
+    }
+
+    const match = raw.match(/[?&]code=([^&\s]+)/i);
+    if (match && match[1]) return cleanText(decodeUrlValue(match[1]));
+    return raw;
+}
+
+function getCodeUpdateRequestToken(req) {
+    const headerToken = cleanText(req.headers['x-code-update-token']);
+    if (headerToken) return headerToken;
+
+    const auth = cleanText(req.headers.authorization);
+    const bearer = auth.match(/^Bearer\s+(.+)$/i);
+    if (bearer && bearer[1]) return cleanText(bearer[1]);
+
+    const queryToken = cleanText(req.query && req.query.token);
+    if (queryToken) return queryToken;
+
+    return cleanText(req.body && req.body.token);
+}
+
+function timingSafeEqualText(left, right) {
+    const a = Buffer.from(cleanText(left));
+    const b = Buffer.from(cleanText(right));
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function parseBooleanFlag(value, fallback) {
+    if (value === undefined || value === null || value === '') return fallback;
+    if (typeof value === 'boolean') return value;
+    const text = cleanText(value).toLowerCase();
+    if (['1', 'true', 'yes', 'y', 'on'].includes(text)) return true;
+    if (['0', 'false', 'no', 'n', 'off'].includes(text)) return false;
+    return fallback;
+}
+
+function makeCodePreview(code) {
+    const text = cleanText(code);
+    if (text.length <= 12) return '*'.repeat(text.length);
+    return `${text.slice(0, 6)}...${text.slice(-4)}`;
+}
+
+function findAccountForCodeUpdate(accounts, rawRef) {
+    const ref = normalizeAccountRef(rawRef);
+    if (!ref) return null;
+
+    const byId = findAccountByRef(accounts, ref);
+    if (byId) return byId;
+
+    const list = Array.isArray(accounts) ? accounts : [];
+    const nameMatches = list.filter((account) => {
+        if (!account || typeof account !== 'object') return false;
+        return [account.name, account.remark, account.nickname]
+            .some(value => normalizeAccountRef(value) === ref);
+    });
+    return nameMatches.length === 1 ? nameMatches[0] : null;
+}
+
 let app = null;
 let server = null;
 let provider = null; // DataProvider
@@ -461,7 +541,7 @@ function startAdminServer(dataProvider) {
     });
 
     app.use('/api', (req, res, next) => {
-        if (req.path === '/login' || req.path === '/qr/create' || req.path === '/qr/check' || req.path === '/card-claim/status' || req.path === '/card-claim/claim' || req.path === '/game-version') return next();
+        if (req.path === '/login' || req.path === '/qr/create' || req.path === '/qr/check' || req.path === '/card-claim/status' || req.path === '/card-claim/claim' || req.path === '/game-version' || req.path === '/code/update') return next();
         return authRequired(req, res, next);
     });
 
@@ -611,6 +691,98 @@ function startAdminServer(dataProvider) {
         const resolved = resolveAccountId(getAccountList(), input);
         return resolved || input;
     };
+
+    app.post('/api/code/update', async (req, res) => {
+        const configuredToken = cleanText(process.env.CODE_UPDATE_TOKEN);
+        if (!configuredToken) {
+            return res.status(404).json({ ok: false, error: 'Code update endpoint is disabled' });
+        }
+
+        const requestToken = getCodeUpdateRequestToken(req);
+        if (!requestToken || !timingSafeEqualText(requestToken, configuredToken)) {
+            return res.status(401).json({ ok: false, error: 'Invalid code update token' });
+        }
+
+        try {
+            const body = (req.body && typeof req.body === 'object') ? req.body : {};
+            const accountRef = cleanText(
+                body.account || body.accountId || body.id || req.query.account || req.query.accountId || req.headers['x-account-id'],
+            );
+            const pushedCode = extractPushedCode(body.code || body.url || body.wsUrl || body.link || req.query.code || req.query.url);
+            const platform = cleanText(body.platform || req.query.platform).toLowerCase();
+            const loginType = cleanText(body.loginType || req.query.loginType);
+            const restart = parseBooleanFlag(body.restart !== undefined ? body.restart : req.query.restart, true);
+
+            if (!accountRef) {
+                return res.status(400).json({ ok: false, error: 'Missing account' });
+            }
+            if (!pushedCode) {
+                return res.status(400).json({ ok: false, error: 'Missing code' });
+            }
+
+            const accountList = getAccountList();
+            const target = findAccountForCodeUpdate(accountList, accountRef);
+            if (!target || !target.id) {
+                return res.status(404).json({ ok: false, error: `Account not found: ${accountRef}` });
+            }
+
+            const accountId = String(target.id);
+            const accountName = target.name || accountId;
+            const wasRunning = provider && typeof provider.isAccountRunning === 'function'
+                ? provider.isAccountRunning(accountId)
+                : false;
+            const payload = {
+                id: accountId,
+                code: pushedCode,
+                codeUpdatedAt: Date.now(),
+                codeUpdateSource: cleanText(body.source || req.query.source || 'manual_push'),
+            };
+            if (platform) payload.platform = platform;
+            if (loginType) payload.loginType = loginType;
+
+            const data = addOrUpdateAccount(payload);
+            const updated = Array.isArray(data.accounts)
+                ? data.accounts.find(account => String(account.id) === accountId)
+                : null;
+
+            let runtimeAction = 'none';
+            if (restart && provider) {
+                if (wasRunning && typeof provider.restartAccount === 'function') {
+                    const ok = await provider.restartAccount(accountId, { skipRefresh: true });
+                    runtimeAction = ok ? 'restarted' : 'restart_failed';
+                } else if (!wasRunning && typeof provider.startAccount === 'function') {
+                    const ok = await provider.startAccount(accountId, { skipRefresh: true });
+                    runtimeAction = ok ? 'started' : 'start_failed';
+                }
+            }
+
+            if (provider && typeof provider.addAccountLog === 'function') {
+                provider.addAccountLog(
+                    'code_update',
+                    `Updated code for account: ${accountName}`,
+                    accountId,
+                    accountName,
+                    { platform: platform || target.platform || '', restart, runtimeAction },
+                );
+            }
+
+            return res.json({
+                ok: true,
+                data: {
+                    accountId,
+                    accountName,
+                    platform: (updated && updated.platform) || platform || target.platform || '',
+                    codePreview: makeCodePreview(pushedCode),
+                    codeLength: pushedCode.length,
+                    wasRunning,
+                    restart,
+                    runtimeAction,
+                },
+            });
+        } catch (e) {
+            return res.status(500).json({ ok: false, error: e.message });
+        }
+    });
 
     // Helper to get account ID from header
     function getAccId(req) {

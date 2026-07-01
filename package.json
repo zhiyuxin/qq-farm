@@ -10,6 +10,7 @@
     "lint:web": "pnpm -C web lint",
     "build:web": "pnpm -C web build",
     "build": "pnpm build:web",
+    "push-code": "node tools/push-code.cjs",
     "package:win": "pnpm build:web && pnpm -C core build:win",
     "package:linux": "pnpm build:web && pnpm -C core build:linux",
     "package:mac": "pnpm build:web && pnpm -C core build:mac",
