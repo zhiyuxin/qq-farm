@@ -73,6 +73,8 @@ function createRuntimeEngine(options = {}) {
     buildConfigSnapshotForAccount,
     getOfflineAutoDeleteMs,
     triggerOfflineReminder,
+    store,
+    getAccounts: store.getAccounts,
     addOrUpdateAccount: store.addOrUpdateAccount,
     deleteAccount: store.deleteAccount,
     onStatusSync: (accountId, status, accountName) => {
@@ -130,7 +132,12 @@ function createRuntimeEngine(options = {}) {
     const accounts = (store.getAccounts().accounts || [])
     if (accounts.length > 0) {
       log('系统', `发现 ${accounts.length} 个账号，正在启动...`)
-      accounts.forEach(acc => startWorker(acc))
+      accounts.forEach((acc) => {
+        startWorker(acc).catch((err) => {
+          const message = err && err.message ? err.message : String(err || 'unknown')
+          log('错误', `账号 ${acc.name || acc.id} 自动启动失败: ${message}`, { accountId: String(acc.id || ''), accountName: acc.name || '' })
+        })
+      })
     }
     else {
       log('系统', '未发现账号，请访问管理面板添加账号')

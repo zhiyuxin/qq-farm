@@ -1,4 +1,5 @@
 const { createScheduler } = require('../services/scheduler');
+const { isWechatAccount, refreshWechatAccountCode } = require('../services/wechat-code');
 
 function createWorkerManager(options) {
     const {
@@ -16,6 +17,8 @@ function createWorkerManager(options) {
         buildConfigSnapshotForAccount,
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
+        store,
+        getAccounts,
         addOrUpdateAccount,
         deleteAccount,
         onStatusSync,
@@ -23,6 +26,8 @@ function createWorkerManager(options) {
     } = options;
     const managerScheduler = createScheduler('worker_manager');
     const useThreadRuntime = runtimeMode === 'thread' && !processRef.pkg && typeof WorkerThread === 'function';
+    const startingAccounts = new Set();
+    const wxCodeRefreshingAccounts = new Set();
 
     function createThreadWorker(account) {
         const worker = new WorkerThread(workerScriptPath, {
@@ -57,7 +62,82 @@ function createWorkerManager(options) {
         return createForkWorker(account);
     }
 
-    function startWorker(account) {
+    function getStoredAccount(accountId) {
+        try {
+            const data = typeof getAccounts === 'function' ? getAccounts() : null;
+            const list = Array.isArray(data && data.accounts) ? data.accounts : [];
+            return list.find(a => String(a.id) === String(accountId)) || null;
+        } catch {
+            return null;
+        }
+    }
+
+    async function refreshWechatCodeForAccount(account, reason, options = {}) {
+        if (!isWechatAccount(account)) return account;
+
+        const accountId = String(account.id || '');
+        const accountName = account.name || accountId;
+        const requireFresh = options.requireFresh === true;
+
+        if (wxCodeRefreshingAccounts.has(accountId)) {
+            if (requireFresh) throw new Error('正在刷新 Code，请稍后重试');
+            log('系统', `微信账号 ${accountName} 正在刷新 Code，跳过重复请求`, { accountId, accountName, reason });
+            return account;
+        }
+
+        wxCodeRefreshingAccounts.add(accountId);
+        try {
+            const result = await refreshWechatAccountCode(account, store, { timeoutMs: options.timeoutMs });
+            if (result && result.skipped) {
+                const message = result.reason === 'missing_wxid'
+                    ? '缺少 wxid，无法自动刷新 Code'
+                    : `跳过刷新 Code: ${result.reason}`;
+                if (requireFresh) throw new Error(message);
+                log('系统', `微信账号 ${accountName} ${message}`, { accountId, accountName, reason });
+                return account;
+            }
+
+            const updated = (result && result.account) || account;
+            log('系统', `微信账号 ${accountName} 已自动刷新 Code`, {
+                accountId,
+                accountName,
+                reason,
+                source: result && result.source ? result.source : '',
+            });
+            addAccountLog(
+                'wx_code_refresh',
+                `微信账号 ${accountName} 已自动刷新 Code`,
+                accountId,
+                accountName,
+                { reason, source: result && result.source ? result.source : '' },
+            );
+            return updated;
+        } catch (error) {
+            const message = error && error.message ? error.message : String(error || 'unknown');
+            log('错误', `微信账号 ${accountName} 刷新 Code 失败: ${message}`, { accountId, accountName, reason });
+            addAccountLog(
+                'wx_code_refresh_failed',
+                `微信账号 ${accountName} 刷新 Code 失败`,
+                accountId,
+                accountName,
+                { reason, error: message },
+            );
+            if (requireFresh || !account.code) throw error;
+            return account;
+        } finally {
+            wxCodeRefreshingAccounts.delete(accountId);
+        }
+    }
+
+    async function prepareAccountForStart(account, options = {}) {
+        if (options.skipRefresh === true) return account;
+        return refreshWechatCodeForAccount(account, options.reason || 'start', {
+            requireFresh: options.requireFresh === true,
+            timeoutMs: options.timeoutMs,
+        });
+    }
+
+    function spawnWorker(account) {
         if (!account || !account.id) return false;
         if (workers[account.id]) return false; // 已运行
 
@@ -85,6 +165,7 @@ function createWorkerManager(options) {
             disconnectedSince: 0,
             autoDeleteTriggered: false,
             wsError: null,
+            wxCodeRestarting: false,
         };
 
         // 发送启动指令
@@ -135,6 +216,31 @@ function createWorkerManager(options) {
         return true;
     }
 
+    async function startWorker(account, options = {}) {
+        if (!account || !account.id) return false;
+        const accountId = String(account.id);
+        if (workers[accountId] || startingAccounts.has(accountId)) return true;
+
+        startingAccounts.add(accountId);
+        try {
+            const latestAccount = getStoredAccount(accountId) || account;
+            const preparedAccount = await prepareAccountForStart(latestAccount, {
+                reason: options.reason || 'start',
+                skipRefresh: options.skipRefresh,
+                requireFresh: options.requireFresh,
+                timeoutMs: options.timeoutMs,
+            });
+            return spawnWorker(preparedAccount);
+        } catch (error) {
+            const message = error && error.message ? error.message : String(error || 'unknown');
+            log('错误', `账号 ${account.name || accountId} 启动失败: ${message}`, { accountId, accountName: account.name || accountId });
+            addAccountLog('start_failed', `账号 ${account.name || accountId} 启动失败`, accountId, account.name || accountId, { reason: message });
+            return false;
+        } finally {
+            startingAccounts.delete(accountId);
+        }
+    }
+
     function stopWorker(accountId) {
         const worker = workers[accountId];
         if (!worker) return;
@@ -152,11 +258,27 @@ function createWorkerManager(options) {
         });
     }
 
-    function restartWorker(account) {
-        if (!account) return;
-        const accountId = account.id;
+    async function restartWorker(account, options = {}) {
+        if (!account) return false;
+        const accountId = String(account.id || '');
+        let preparedAccount = account;
+        try {
+            const latestAccount = getStoredAccount(accountId) || account;
+            preparedAccount = await prepareAccountForStart(latestAccount, {
+                reason: options.reason || 'restart',
+                skipRefresh: options.skipRefresh,
+                requireFresh: options.requireFresh,
+                timeoutMs: options.timeoutMs,
+            });
+        } catch (error) {
+            const message = error && error.message ? error.message : String(error || 'unknown');
+            log('错误', `账号 ${account.name || accountId} 重启前准备失败: ${message}`, { accountId, accountName: account.name || accountId });
+            addAccountLog('restart_failed', `账号 ${account.name || accountId} 重启前准备失败`, accountId, account.name || accountId, { reason: message });
+            return false;
+        }
+
         const worker = workers[accountId];
-        if (!worker) return startWorker(account);
+        if (!worker) return startWorker(preparedAccount, { skipRefresh: true });
         const proc = worker.process;
         let started = false;
         const startOnce = () => {
@@ -164,10 +286,10 @@ function createWorkerManager(options) {
             started = true;
             managerScheduler.clear(`restart_fallback_${accountId}`);
             const current = workers[accountId];
-            if (!current) return startWorker(account);
+            if (!current) return startWorker(preparedAccount, { skipRefresh: true });
             if (current.process !== proc) return;
             delete workers[accountId];
-            startWorker(account);
+            startWorker(preparedAccount, { skipRefresh: true });
         };
         const killIfStale = () => {
             const current = workers[accountId];
@@ -179,7 +301,8 @@ function createWorkerManager(options) {
             return true;
         };
         if (typeof proc.exitCode === 'number' || proc.signalCode) {
-            return startOnce();
+            startOnce();
+            return true;
         }
         proc.once('exit', startOnce);
         stopWorker(accountId);
@@ -187,6 +310,54 @@ function createWorkerManager(options) {
             if (started) return;
             killIfStale();
             startOnce();
+        });
+        return true;
+    }
+
+    function scheduleWechatCodeRefreshRestart(accountId, message = '') {
+        const worker = workers[accountId];
+        if (!worker || worker.wxCodeRestarting) return;
+
+        const storedAccount = getStoredAccount(accountId);
+        if (!isWechatAccount(storedAccount)) return;
+
+        worker.wxCodeRestarting = true;
+        log('系统', `微信账号 ${worker.name} Code 失效，准备自动刷新并重启`, {
+            accountId: String(accountId),
+            accountName: worker.name,
+            message,
+        });
+        addAccountLog(
+            'wx_code_refresh_restart',
+            `微信账号 ${worker.name} Code 失效，准备自动刷新并重启`,
+            accountId,
+            worker.name,
+            { reason: 'ws_400', message },
+        );
+
+        managerScheduler.setTimeoutTask(`wx_code_refresh_restart_${accountId}`, 1000, async () => {
+            try {
+                const latestAccount = getStoredAccount(accountId) || storedAccount;
+                const preparedAccount = await refreshWechatCodeForAccount(latestAccount, 'ws_400', { requireFresh: true });
+                const current = workers[accountId];
+                if (current) current.wxCodeRestarting = false;
+                await restartWorker(preparedAccount, { skipRefresh: true });
+            } catch (error) {
+                const current = workers[accountId];
+                if (current) current.wxCodeRestarting = false;
+                const errorMessage = error && error.message ? error.message : String(error || 'unknown');
+                log('错误', `微信账号 ${worker.name} 自动刷新 Code 失败，无法自动重启: ${errorMessage}`, {
+                    accountId: String(accountId),
+                    accountName: worker.name,
+                });
+                addAccountLog(
+                    'wx_code_refresh_restart_failed',
+                    `微信账号 ${worker.name} 自动刷新 Code 失败，无法自动重启`,
+                    accountId,
+                    worker.name,
+                    { reason: 'ws_400', error: errorMessage },
+                );
+            }
         });
     }
 
@@ -288,6 +459,7 @@ function createWorkerManager(options) {
                     accountId,
                     worker.name,
                 );
+                scheduleWechatCodeRefreshRestart(accountId, message);
             }
         } else if (msg.type === 'account_kicked') {
             const reason = msg.reason || '未知';

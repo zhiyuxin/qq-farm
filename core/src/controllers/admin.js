@@ -1354,7 +1354,7 @@ function startAdminServer(dataProvider) {
     });
 
     // API: 启动账号
-    app.post('/api/accounts/:id/start', (req, res) => {
+    app.post('/api/accounts/:id/start', async (req, res) => {
         try {
             const accountId = resolveAccId(req.params.id);
 
@@ -1363,7 +1363,7 @@ function startAdminServer(dataProvider) {
                 return res.status(403).json({ ok: false, error: '无权访问此账号' });
             }
 
-            const ok = provider.startAccount(accountId);
+            const ok = await provider.startAccount(accountId);
             if (!ok) {
                 return res.status(404).json({ ok: false, error: 'Account not found' });
             }
@@ -2089,7 +2089,7 @@ function startAdminServer(dataProvider) {
         }
     });
 
-    app.post('/api/accounts', (req, res) => {
+    app.post('/api/accounts', async (req, res) => {
         try {
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
             const currentUser = req.currentUser;
@@ -2157,10 +2157,10 @@ function startAdminServer(dataProvider) {
             // 如果是新增，自动启动
             if (!isUpdate) {
                 const newAcc = data.accounts[data.accounts.length - 1];
-                if (newAcc) provider.startAccount(newAcc.id);
+                if (newAcc) await provider.startAccount(newAcc.id);
             } else if (wasRunning && !onlyRemarkChanged) {
                 // 如果是更新，且之前在运行，且不是仅修改备注，则重启
-                provider.restartAccount(payload.id);
+                await provider.restartAccount(payload.id);
             }
             res.json({ ok: true, data });
         } catch (e) {

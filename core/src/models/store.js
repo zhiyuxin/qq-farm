@@ -1139,6 +1139,8 @@ function addOrUpdateAccount(acc) {
             name: acc.name || `账号${id}`,
             code: acc.code || '',
             platform: acc.platform || 'qq',
+            loginType: acc.loginType || '',
+            wxid: acc.wxid ? String(acc.wxid) : '',
             uin: acc.uin ? String(acc.uin) : '',
             qq: acc.qq ? String(acc.qq) : (acc.uin ? String(acc.uin) : ''),
             avatar: acc.avatar || acc.avatarUrl || '',
